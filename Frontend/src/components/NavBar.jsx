@@ -32,7 +32,7 @@ const NavBar = () => {
       data-theme="cupcake"
     >
       <div className="flex-1">
-        <Link to="/" className="btn btn-ghost normal-case text-white text-2xl tracking-wider hover:scale-105 transition-transform duration-300">
+        <Link to="/" className="btn btn-ghost normal-case text-white bg-transparent border-none text-2xl tracking-wider hover:scale-105 transition-transform duration-300">
           🌸 AniChat
         </Link>
       </div>
@@ -95,7 +95,6 @@ const NavBar = () => {
           )}
         </AnimatePresence>
       </div>
-      <ToastContainer />
     </motion.div>
   );
 };
