@@ -6,6 +6,12 @@ const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 const ErrorHandler = require('../utils/errorHandler');
 const cloudinary = require('../config/cloudinary');
+const multer = require('multer');
+
+// Configure Multer for memory storage
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
+
 // Configure Nodemailer transporter
 const transporter = nodemailer.createTransport({
     service: 'gmail',
@@ -85,57 +91,78 @@ const sendResponseWithToken = (user, res) => {
     });
 };
 
-exports.signup = async (req, res, next) => {
-    const { fullName, email, password, avatar } = req.body;
-    try {
-        if (!fullName || !email || !password) {
-            return next(new ErrorHandler('Please provide all required fields', 400));
+// Use multer middleware for signup to handle multipart/form-data
+exports.signup = [
+    upload.single('avatar'),
+    async (req, res, next) => {
+        try {
+            const { fullName, email, password } = req.body;
+
+            if (!fullName || !email || !password) {
+                return next(new ErrorHandler('Please provide all required fields', 400));
+            }
+
+            // Validate email format
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRegex.test(email)) {
+                return next(new ErrorHandler('Invalid email format', 400));
+            }
+            if (password.length < 6) {
+                return next(new ErrorHandler('Password must be at least 6 characters', 400));
+            }
+            if (fullName.length < 3) {
+                return next(new ErrorHandler('Full name must be at least 3 characters', 400));
+            }
+
+            // Check if user already exists
+            const existingUser = await User.findOne({ email });
+            if (existingUser) {
+                return next(new ErrorHandler('User already exists', 400));
+            }
+
+            // Handle avatar upload to Cloudinary if present
+            let avatarUrl = '';
+            if (req.file) {
+                const result = await cloudinary.uploader.upload_stream(
+                    { folder: 'anichat/avatars', width: 200, height: 200, crop: 'fill' },
+                    (error, result) => {
+                        if (error) {
+                            return next(new ErrorHandler('Failed to upload avatar', 500));
+                        }
+                        return result;
+                    }
+                );
+                req.file.stream.pipe(result);
+                avatarUrl = result.secure_url;
+            }
+
+            // Generate OTP
+            const otp = generateOtp();
+            const otpExpires = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes expiry
+
+            // Hash password before storing
+            const hashedPassword = await bcrypt.hash(password, 10);
+
+            // Store OTP in MongoDB
+            await Otp.findOneAndUpdate(
+                { email },
+                { email, otp, fullName, password: hashedPassword, avatar: avatarUrl, expires: otpExpires },
+                { upsert: true, new: true }
+            );
+
+            // Send OTP to user's email
+            await sendSignupOtpEmail(email, otp);
+
+            res.status(200).json({
+                success: true,
+                message: 'OTP sent to your email. Please verify to complete signup.',
+            });
+        } catch (error) {
+            console.error('Signup error:', error);
+            return next(new ErrorHandler('Internal server error', 500));
         }
-
-        // Validate email format
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(email)) {
-            return next(new ErrorHandler('Invalid email format', 400));
-        }
-        if (password.length < 6) {
-            return next(new ErrorHandler('Password must be at least 6 characters', 400));
-        }
-        if (fullName.length < 3) {
-            return next(new ErrorHandler('Full name must be at least 3 characters', 400));
-        }
-
-        // Check if user already exists
-        const existingUser = await User.findOne({ email });
-        if (existingUser) {
-            return next(new ErrorHandler('User already exists', 400));
-        }
-
-        // Generate OTP
-        const otp = generateOtp();
-        const otpExpires = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes expiry
-
-        // Hash password before storing
-        const hashedPassword = await bcrypt.hash(password, 10);
-
-        // Store OTP in MongoDB
-        await Otp.findOneAndUpdate(
-            { email },
-            { email, otp, fullName, password: hashedPassword, avatar, expires: otpExpires },
-            { upsert: true, new: true }
-        );
-
-        // Send OTP to user's email
-        await sendSignupOtpEmail(email, otp);
-
-        res.status(200).json({
-            success: true,
-            message: 'OTP sent to your email. Please verify to complete signup.',
-        });
-    } catch (error) {
-        console.error('Signup error:', error);
-        return next(new ErrorHandler('Internal server error', 500));
     }
-};
+];
 
 exports.verifyOtp = async (req, res, next) => {
     const { email, otp } = req.body;
@@ -299,38 +326,52 @@ exports.resetPassword = async (req, res, next) => {
     }
 };
 
-exports.updateProfile = async (req, res, next) => {
-    try {
-        const { avatar } = req.body;
-        const userId = req.user._id; // Assuming you have user ID from the token
-        if (!avatar) {
-            return next(new ErrorHandler('Please provide an avatar', 400));
+exports.updateProfile = [
+    upload.single('avatar'),
+    async (req, res, next) => {
+        try {
+            const userId = req.user._id;
+            let avatarUrl = req.user.avatar || '';
+
+            // Only process if a new file is uploaded
+            if (req.file) {
+                const uploadPromise = new Promise((resolve, reject) => {
+                    cloudinary.uploader.upload_stream(
+                        { folder: 'avatars', width: 150, height: 150, crop: 'fill' },
+                        (error, result) => {
+                            if (error) reject(new ErrorHandler('Failed to upload avatar', 500));
+                            resolve(result);
+                        }
+                    ).end(req.file.buffer);
+                });
+
+                const result = await uploadPromise;
+                avatarUrl = result.secure_url;
+            }
+
+            // Update user profile (only if avatar changed)
+            const user = await User.findByIdAndUpdate(
+                userId,
+                { avatar: avatarUrl },
+                { new: true, runValidators: true }
+            );
+
+            res.status(200).json({
+                success: true,
+                message: 'Profile updated successfully',
+                user: {
+                    fullName: user.fullName,
+                    email: user.email,
+                    avatar: user.avatar,
+                    createdAt: user.createdAt,
+                },
+            });
+        } catch (error) {
+            console.error('Update profile error:', error);
+            next(new ErrorHandler(error.message || 'Internal server error', 500));
         }
-        // Upload image to Cloudinary
-        const result = await cloudinary.uploader.upload(avatar, {
-            folder: 'avatars',
-            width: 150,
-            height: 150,
-            crop: 'fill',
-        });
-
-        // Update user profile
-        const user = await User.findByIdAndUpdate(
-            userId,
-            { avatar: result.secure_url },
-            { new: true, runValidators: true }
-        );
-
-        res.status(200).json({
-            success: true,
-            message: 'Profile updated successfully',
-            user,
-        });
-    } catch (error) {
-        console.error('Update profile error:', error);
-        return next(new ErrorHandler('Internal server error', 500));
     }
-}
+];
 
 exports.checkAuth = async (req, res, next) => {
     try {
@@ -343,4 +384,4 @@ exports.checkAuth = async (req, res, next) => {
         console.error('Check auth error:', error);
         return next(new ErrorHandler('Internal server error', 500));
     }
-}
+};

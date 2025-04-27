@@ -31,8 +31,9 @@ process.on("uncaughtException", (err) => {
 const userRoute = require('./routes/userRoutes');
 const messageRoute = require('./routes/messageRoutes');
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-app.use("/api/v1", userRoute);
+app.use("/api/v1/auth", userRoute);
 app.use("/api/v1", messageRoute);
 
 
